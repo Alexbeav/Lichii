@@ -124,6 +124,37 @@ TEST_CASE("GitHub optional fields can be null or missing", "[updater]") {
     CHECK(releases[0].html_url == "https://github.com/zortos293/Lichii/releases/tag/build-71");
 }
 
+TEST_CASE("Lichii exposes the digest published for each asset", "[updater]") {
+    const std::string url =
+        "https://github.com/zortos293/Lichii/releases/download/build-71/lichii-windows-x86_64.zip";
+    const std::string digest =
+        "sha256:9f2c1b0d3a4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8";
+    const nlohmann::json json{
+        {"tag_name", "build-71"},
+        {"name", "Lichii nx2 build-71"},
+        {"prerelease", true},
+        {"assets", {{{"browser_download_url", url}, {"digest", digest}}}},
+    };
+
+    const auto release =
+        Common::Net::Release::FromJson(json, "https://api.github.com", "zortos293/Lichii");
+    REQUIRE(release);
+
+    const auto assets = release->GetPlatformAssets("windows-x86_64");
+    REQUIRE(assets.size() == 1);
+    CHECK(assets[0].digest == digest);
+    CHECK(release->GetAssetDigest(url) == digest);
+    CHECK(release->GetAssetDigest("https://example.invalid/elsewhere.zip").empty());
+}
+
+TEST_CASE("Lichii tolerates releases that publish no digest", "[updater]") {
+    const auto release =
+        MakeRelease("build-71", "lichii-windows-x86_64.zip");
+    const auto assets = release.GetPlatformAssets("windows-x86_64");
+    REQUIRE(assets.size() == 1);
+    CHECK(assets[0].digest.empty());
+}
+
 TEST_CASE("Release requests handle HTTP failures without throwing", "[updater]") {
     const int status = GENERATE(200, 403, 429, 500);
     httplib::Server server;

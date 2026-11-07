@@ -18,6 +18,15 @@
 
 namespace Common::Net {
 
+std::string Release::GetAssetDigest(std::string_view url) const {
+    for (std::size_t i = 0; i < assets.size() && i < asset_digests.size(); ++i) {
+        if (std::string_view{assets[i]} == url) {
+            return asset_digests[i];
+        }
+    }
+    return {};
+}
+
 std::vector<Asset> Release::GetPlatformAssets() const {
     return GetPlatformAssets(Common::g_build_release_platform);
 }
@@ -43,7 +52,8 @@ std::vector<Asset> Release::GetPlatformAssets(std::string_view platform) const {
                 return {{.name = platform.ends_with("-pgo") ? "PGO" : "Standard",
                          .url = host_url,
                          .path = path + filename,
-                         .filename = filename}};
+                         .filename = filename,
+                         .digest = GetAssetDigest(asset)}};
             }
         }
     }
@@ -110,6 +120,7 @@ std::optional<Release> Release::FromJson(const nlohmann::json& json, const std::
     }
     for (const auto& asset : assets) {
         rel.assets.emplace_back(asset.value("browser_download_url", std::string{}));
+        rel.asset_digests.emplace_back(asset.value("digest", std::string{}));
     }
 
     return rel;

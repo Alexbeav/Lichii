@@ -1,6 +1,12 @@
 // SPDX-FileCopyrightText: Copyright 2026 Eden Emulator Project
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+#include <array>
+#include <cstddef>
+#include <string>
+#include <string_view>
+#include <utility>
+
 #include <QRadioButton>
 #include <QSaveFile>
 #include <QStandardPaths>
@@ -17,9 +23,79 @@
 #include <openssl/cert.h>
 #endif
 
+#include <openssl/evp.h>
+
 #include <QDesktopServices>
 
 #undef GetSaveFileName
+
+namespace {
+
+// Checks a downloaded file against the digest the release host publishes ("sha256:<hex>").
+// Verification is skipped when the host publishes no digest for the asset.
+class DigestVerifier {
+public:
+    explicit DigestVerifier(std::string expected) : m_expected{std::move(expected)} {
+        constexpr std::string_view prefix{"sha256:"};
+        if (m_expected.starts_with(prefix)) {
+            m_expected.erase(0, prefix.size());
+        }
+        if (m_expected.empty()) {
+            return;
+        }
+        m_ctx = EVP_MD_CTX_new();
+        if (m_ctx != nullptr && EVP_DigestInit_ex(m_ctx, EVP_sha256(), nullptr) == 1) {
+            m_enabled = true;
+        }
+    }
+
+    ~DigestVerifier() {
+        if (m_ctx != nullptr) {
+            EVP_MD_CTX_free(m_ctx);
+        }
+    }
+
+    DigestVerifier(const DigestVerifier&) = delete;
+    DigestVerifier& operator=(const DigestVerifier&) = delete;
+
+    // False when there is no published digest, so nothing can be verified.
+    bool CanVerify() const {
+        return m_enabled;
+    }
+
+    bool Update(const char* data, std::size_t size) {
+        if (!m_enabled) {
+            return true;
+        }
+        return EVP_DigestUpdate(m_ctx, data, size) == 1;
+    }
+
+    bool Matches() {
+        if (!m_enabled) {
+            return true;
+        }
+        std::array<unsigned char, EVP_MAX_MD_SIZE> digest{};
+        unsigned int size{0};
+        if (EVP_DigestFinal_ex(m_ctx, digest.data(), &size) != 1) {
+            return false;
+        }
+        static constexpr char hex_digits[] = "0123456789abcdef";
+        std::string hex;
+        hex.reserve(size * 2);
+        for (unsigned int i = 0; i < size; ++i) {
+            hex += hex_digits[digest[i] >> 4];
+            hex += hex_digits[digest[i] & 0xf];
+        }
+        return hex == m_expected;
+    }
+
+private:
+    std::string m_expected;
+    EVP_MD_CTX* m_ctx{};
+    bool m_enabled{};
+};
+
+} // namespace
 
 UpdateDialog::UpdateDialog(const Common::Net::Release& release, QWidget* parent)
     : QDialog(parent), ui(new Ui::UpdateDialog) {
@@ -92,6 +168,13 @@ void UpdateDialog::Download() {
         return;
     }
 
+    // The release host publishes a SHA-256 for each asset; compare what arrives against it.
+    DigestVerifier digest{m_asset.digest};
+    if (!digest.CanVerify()) {
+        LOG_INFO(Frontend, "No published digest for {}, the download cannot be verified",
+                 m_asset.filename);
+    }
+
     // TODO(crueter): Move to net.cpp
     constexpr std::size_t timeout_seconds = 15;
 
@@ -125,8 +208,15 @@ void UpdateDialog::Download() {
         return !progress->wasCanceled();
     };
 
-    // Write file in chunks.
-    auto content_receiver = [&file, filename](const char* t_data, size_t data_length) -> bool {
+    // Write file in chunks, hashing as we go.
+    auto content_receiver = [&file, filename, &digest](const char* t_data,
+                                                       size_t data_length) -> bool {
+        if (!digest.Update(t_data, data_length)) {
+            LOG_ERROR(Frontend, "Could not hash {} bytes for {}", data_length,
+                      filename.toStdString());
+            return false;
+        }
+
         if (file.write(t_data, data_length) == -1) {
             LOG_WARNING(Frontend, "Could not write {} bytes to file {}", data_length,
                         filename.toStdString());
@@ -160,6 +250,18 @@ void UpdateDialog::Download() {
     }
     if (!response.has_header("content-type")) {
         LOG_ERROR(Frontend, "GET to {}{} returned no content", m_asset.url, m_asset.path);
+        return;
+    }
+
+    if (!digest.Matches()) {
+        LOG_ERROR(Frontend, "{} does not match the digest published for this release",
+                  m_asset.filename);
+        file.cancelWriting();
+        QtCommon::Frontend::Critical(
+            tr("Failed to verify download"),
+            tr("%1 does not match the SHA-256 published for this release. The file was "
+               "discarded; download it again from the release page.")
+                .arg(QString::fromStdString(m_asset.filename)));
         return;
     }
 

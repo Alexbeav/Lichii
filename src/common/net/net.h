@@ -17,6 +17,8 @@ struct Asset {
     std::string url;
     std::string path;
     std::string filename;
+    // Expected SHA-256 of the file as "sha256:<hex>", or empty when the host publishes none.
+    std::string digest;
 };
 
 struct Release {
@@ -28,10 +30,15 @@ struct Release {
     std::string host;
 
     std::vector<std::string> assets;
+    // Digest for the asset at the same index of |assets|; empty when the host publishes none.
+    std::vector<std::string> asset_digests;
 
     u64 id;
     u64 published;
     bool prerelease;
+
+    // Expected digest for an asset URL, or an empty string when the host does not publish one.
+    std::string GetAssetDigest(std::string_view url) const;
 
     // Get the relevant list of assets for the current platform.
     std::vector<Asset> GetPlatformAssets() const;
